@@ -423,7 +423,8 @@
   // ── Chart ──────────────────────────────────────────────────
   // We plot log10(portfolio value) on a LINEAR axis.
   // Trade metadata is stored in a parallel array for tooltip access.
-  let chartTradeData = [];  // parallel to chart data points
+  let chartTradeData = [];
+  const ACTION_LABELS = { b: 'buy', h: 'hold', s: 'switch →' };
 
   const ctx = document.getElementById('chart').getContext('2d');
   const chart = new Chart(ctx, {
@@ -457,17 +458,13 @@
             afterLabel: function(item) {
               const t = chartTradeData[item.dataIndex];
               if (!t) return '';
-              const ticker = t.ticker === '__CASH__' ? 'CASH' : t.ticker;
-              const ret = t.daily_return > 0
-                ? '+' + (t.daily_return * 100).toFixed(2) + '%'
-                : t.daily_return < 0
-                  ? (t.daily_return * 100).toFixed(2) + '%'
+              const ticker = t.t === '__CASH__' ? 'CASH' : t.t;
+              const ret = t.r > 0
+                ? '+' + (t.r * 100).toFixed(2) + '%'
+                : t.r < 0
+                  ? (t.r * 100).toFixed(2) + '%'
                   : '0.00%';
-              const action = t.action === 'switch'
-                ? 'switch → ' + ticker
-                : t.action === 'buy'
-                  ? 'buy ' + ticker
-                  : 'hold ' + ticker;
+              const action = (ACTION_LABELS[t.a] || t.a) + ' ' + ticker;
               return action + '  ' + ret;
             },
           }
@@ -503,6 +500,18 @@
     },
   });
 
+  // ── Master trades + precomputed prefix sums ─────────────────
+  const masterTrades = DATA.trades || [];
+
+  // Precompute running log10 cumulative from each possible start index
+  // would be O(n²) memory. Instead we'll compute per-horizon on the fly
+  // using a prefix sum of the `l` field.
+  const log10PrefixSum = new Float64Array(masterTrades.length + 1);
+  for (let i = 0; i < masterTrades.length; i++) {
+    log10PrefixSum[i + 1] = log10PrefixSum[i] + masterTrades[i].l;
+  }
+  // log10 cumulative from index start..i = log10PrefixSum[i+1] - log10PrefixSum[start]
+
   // ── Update ─────────────────────────────────────────────────
   function update() {
     const s = strategies[String(selectedN)];
@@ -511,6 +520,9 @@
     const log10initial = Math.log10(initial);
     const log10return = s.log10_total_return;
     const log10final = log10initial + log10return;
+    const startIdx = s.trade_start_index;
+    const endIdx = masterTrades.length;
+    const tradeCount = endIdx - startIdx;
 
     // Big number
     document.getElementById('big-number').innerHTML = fmtLog10DollarBig(log10final);
@@ -522,36 +534,38 @@
     ];
     document.getElementById('sub-stats').innerHTML = subParts.join(' · ');
 
-    // Chart: plot log10(portfolio value) over time
-    const trades = s.trades || [];
-    const step = Math.max(1, Math.floor(trades.length / 500));
+    // Chart: sample ~500 points from the horizon slice
+    const step = Math.max(1, Math.floor(tradeCount / 500));
     const labels = [];
     const values = [];
     chartTradeData = [];
 
-    for (let i = 0; i < trades.length; i += step) {
-      labels.push(trades[i].date);
-      values.push(log10initial + trades[i].log10_cumulative);
-      chartTradeData.push(trades[i]);
+    for (let i = startIdx; i < endIdx; i += step) {
+      const t = masterTrades[i];
+      const log10cum = log10PrefixSum[i + 1] - log10PrefixSum[startIdx];
+      labels.push(t.d);
+      values.push(log10initial + log10cum);
+      chartTradeData.push(t);
     }
-    if (trades.length > 0) {
-      const last = trades[trades.length - 1];
-      if (labels[labels.length - 1] !== last.date) {
-        labels.push(last.date);
-        values.push(log10initial + last.log10_cumulative);
-        chartTradeData.push(last);
+    // Ensure last point
+    if (endIdx > startIdx) {
+      const lastIdx = endIdx - 1;
+      const lastT = masterTrades[lastIdx];
+      if (labels[labels.length - 1] !== lastT.d) {
+        labels.push(lastT.d);
+        values.push(log10initial + log10return);
+        chartTradeData.push(lastT);
       }
     }
 
     chart.data.labels = labels;
     chart.data.datasets[0].data = values;
-    // Set Y min to just below initial
     chart.options.scales.y.min = Math.max(0, log10initial - 0.5);
     chart.update('none');
 
-    document.getElementById('chart-note').textContent = trades.length > 0
+    document.getElementById('chart-note').textContent = tradeCount > 0
       ? `${s.start_date} → ${s.end_date} · ${s.trading_days.toLocaleString()} days · log\u2081\u2080 scale`
-      : 'No trade data (--compact mode)';
+      : 'No trade data';
 
     // Table
     const tbody = document.getElementById('table-body');
